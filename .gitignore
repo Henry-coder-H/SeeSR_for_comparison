@@ -1,0 +1,51 @@
+# ===== Python 常规 =====
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.so
+.ipynb_checkpoints/
+.venv/
+venv/
+.env
+.env.*
+
+# ===== 日志 / 运行产物 =====
+logs/
+wandb/
+tensorboard/
+*.log
+
+# ===== 输出目录（不传推理/训练产物）=====
+experience/
+outputs/
+results/
+preset/datasets/output/
+
+# ===== 数据集（只保留脚本，不传原始数据）=====
+preset/datasets/train_datasets/
+preset/datasets/training_datasets/
+preset/datasets/test_datasets/
+preset/datasets/*/HR/
+preset/datasets/*/LR*/
+data/
+dataset/
+datasets/
+
+# ===== 训练权重/模型文件（不传）=====
+preset/models/
+*.pth
+*.pt
+*.ckpt
+*.bin
+*.safetensors
+*.onnx
+*.h5
+*.npz
+
+# ===== 图片大文件（按需保留）=====
+# 如果你要保留少量示例图，可以在下面单独“反忽略”某些路径
+*.png
+*.jpg
+*.jpeg
+*.bmp

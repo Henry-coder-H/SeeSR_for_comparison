@@ -41,7 +41,7 @@ ram_transforms = transforms.Compose([
 
 import argparse
 parser = argparse.ArgumentParser()
-parser.add_argument("--root_path", type=str, default='preset/datasets/train_datasets/training_for_seesr', help='the dataset you want to tag.') # 
+parser.add_argument("--root_path", type=str, default='/data4/huangsiyu/SeeSR/preset/datasets/train_datasets/training_for_seesr', help='the dataset you want to tag.') # 
 parser.add_argument("--start_gpu", type=int, default=0, help='if you have 5 GPUs, you can set it to 0/1/2/3/4 when using different GPU for parallel processing. It will save your time.') 
 parser.add_argument("--all_gpu", type=int, default=1, help='if you set --start_gpu max to 5, please set it to 5') 
 args = parser.parse_args()

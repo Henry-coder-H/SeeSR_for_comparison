@@ -34,6 +34,7 @@ from diffusers.models.embeddings import (
     TextTimeEmbedding,
     TimestepEmbedding,
     Timesteps,
+    ScaleTimeEmbedding, # add
 )
 from diffusers.models.modeling_utils import ModelMixin
 from .unet_2d_blocks import (
@@ -210,7 +211,7 @@ class UNet2DConditionModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin)
     ):
         super().__init__()
 
-        self.sample_size = sample_size
+        self.sample_size = sample_size # 在stable diffusion中，下采样倍数为8倍，这里sample_size = 64(latent space)说明输出为512分辨率
 
         if num_attention_heads is not None:
             raise ValueError(
@@ -293,6 +294,19 @@ class UNet2DConditionModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin)
             post_act_fn=timestep_post_act,
             cond_proj_dim=time_cond_proj_dim,
         )
+
+        # # scale embedding
+        # if scale_embedding_type == "rope":
+        #     from diffusers.models.embeddings import ScaleRoPEEmbedding
+        #     self.scale_embedding = ScaleRoPEEmbedding(
+        #         embedding_dim=scale_embedding_dim or time_embed_dim,
+        #         act_fn=act_fn,
+        #         post_act_fn=timestep_post_act,
+        #     )
+        #     self.concat_scale_time = True  # 用于后续拼接
+        # else:
+        #     self.scale_embedding = None
+        #     self.concat_scale_time = False
 
         if encoder_hid_dim_type is None and encoder_hid_dim is not None:
             encoder_hid_dim_type = "text_proj"
@@ -382,6 +396,18 @@ class UNet2DConditionModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin)
         elif addition_embed_type == "image_hint":
             # Kandinsky 2.2 ControlNet
             self.add_embedding = ImageHintTimeEmbedding(image_embed_dim=encoder_hid_dim, time_embed_dim=time_embed_dim)
+        # 此处为我添加的scale部分
+        elif addition_embed_type == "scale":
+            # 这里 time_embed_dim 是你现有UNet里用于timestep embedding的维度
+            # 可选：把rope_dim/rope_base做成config字段或init参数
+            self.add_embedding = ScaleTimeEmbedding(
+                time_embed_dim=time_embed_dim,   # 和timestep embedding相同维度，方便相加
+                rope_dim=128,
+                rope_base=10000.0,
+                use_norm=True,
+            )
+
+
         elif addition_embed_type is not None:
             raise ValueError(f"addition_embed_type: {addition_embed_type} must be None, 'text' or 'text_image'.")
 
@@ -425,6 +451,7 @@ class UNet2DConditionModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin)
         else:
             blocks_time_embed_dim = time_embed_dim
 
+    
         # down
         output_channel = block_out_channels[0]
         for i, down_block_type in enumerate(down_block_types):
@@ -821,6 +848,7 @@ class UNet2DConditionModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin)
         emb = self.time_embedding(t_emb, timestep_cond)
         aug_emb = None
 
+
         if self.class_embedding is not None:
             if class_labels is None:
                 raise ValueError("class_labels should be provided when num_class_embeds > 0")
@@ -887,6 +915,36 @@ class UNet2DConditionModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin)
             hint = added_cond_kwargs.get("hint")
             aug_emb, hint = self.add_embedding(image_embs, hint)
             sample = torch.cat([sample, hint], dim=1)
+
+        # 添加这一段的逻辑
+        elif self.config.addition_embed_type == "scale":
+            # 连续倍率超分：要求在 added_cond_kwargs 中传入 'scale'
+            if added_cond_kwargs is None or (
+                "scale" not in added_cond_kwargs and "scales" not in added_cond_kwargs
+            ):
+                raise ValueError(
+                    f"{self.__class__} has `addition_embed_type`='scale' which requires "
+                    f"added_cond_kwargs to contain key 'scale' (or 'scales')."
+                )
+
+            scale = added_cond_kwargs.get("scale", added_cond_kwargs.get("scales"))
+
+            # 接受标量、(B,) 或 (B,1)；统一成 (B,)
+            if not torch.is_tensor(scale):
+                scale = torch.tensor(scale, device=sample.device, dtype=emb.dtype)
+            else:
+                scale = scale.to(device=sample.device, dtype=emb.dtype)
+
+            if scale.ndim == 0:
+                # 单个标量 → 扩展到 batch
+                scale = scale.expand(sample.shape[0])
+            elif scale.ndim == 2 and scale.shape[1] == 1:
+                scale = scale.squeeze(1)
+            elif scale.ndim != 1:
+                raise ValueError(f"'scale' must be scalar or 1D tensor, got shape {tuple(scale.shape)}")
+
+            # 生成与 time_embed_dim 一致的 embedding
+            aug_emb = self.add_embedding(scale)
 
         emb = emb + aug_emb if aug_emb is not None else emb
 

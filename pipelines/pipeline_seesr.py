@@ -808,7 +808,8 @@ class StableDiffusionControlNetPipeline(DiffusionPipeline, TextualInversionLoade
         ram_encoder_hidden_states=None,
         latent_tiled_size=320,
         latent_tiled_overlap=4,
-        args=None
+        args=None,
+        scale_value: Optional[Union[float, torch.Tensor]] = None # add：连续倍率（float 或 1D tensor）
     ):
         r"""
         Function invoked when calling the pipeline for generation.
@@ -952,6 +953,44 @@ class StableDiffusionControlNetPipeline(DiffusionPipeline, TextualInversionLoade
             ram_encoder_hidden_states=ram_encoder_hidden_states
         )
 
+        # add
+        # Prepare scale tensor (支持 float 或 tensor；自动对齐 batch 并处理 CFG 拼接)
+        def _make_scale_base(val, device, dtype, base_bs: int) -> Optional[torch.Tensor]:
+            """
+            返回 shape=(base_bs,) 的一维张量；若 val=None 则返回 None。
+            base_bs = batch_size * num_images_per_prompt（未做 CFG 拼接）
+            """
+            if val is None:
+                return None
+            if isinstance(val, torch.Tensor):
+                t = val.to(device=device, dtype=dtype).view(-1)
+            else:
+                t = torch.tensor([float(val)], device=device, dtype=dtype).view(-1)
+
+            if t.numel() == 1:
+                t = t.repeat(base_bs)
+            elif t.numel() != base_bs:
+                # 尝试重复到目标长度（安全兜底）
+                rep = int(np.ceil(base_bs / float(t.numel())))
+                t = t.repeat(rep)[:base_bs]
+            return t
+
+        base_bs = batch_size * num_images_per_prompt          # 未 CFG 拼接的有效 batch
+        _dtype  = prompt_embeds.dtype                         # 与 UNet/latents 一致
+        _device = self._execution_device
+
+        scale_base = _make_scale_base(scale_value, _device, _dtype, base_bs)  # (base_bs,) 或 None
+        # 对于非 guess_mode 的 CFG，要把 scale 也做 uncond/cond 拼接
+        if scale_base is None:
+            scale_full = None
+        else:
+            scale_full = (
+                torch.cat([scale_base, scale_base], dim=0)
+                if (do_classifier_free_guidance and not guess_mode)
+                else scale_base
+            )
+
+
         # 4. Prepare image
         image = self.prepare_image(
             image=image,
@@ -1029,6 +1068,8 @@ class StableDiffusionControlNetPipeline(DiffusionPipeline, TextualInversionLoade
 
                 if h*w<=tile_size*tile_size: # tiled latent input
                     down_block_res_samples, mid_block_res_sample = [None]*10, None
+                    # 关键：把 scale 通过 added_cond_kwargs 传进 ControlNet
+                    _scale_for_cn = scale_base if (guess_mode and do_classifier_free_guidance) else scale_full
                     down_block_res_samples, mid_block_res_sample = self.controlnet(
                         controlnet_latent_model_input,
                         t,
@@ -1038,6 +1079,7 @@ class StableDiffusionControlNetPipeline(DiffusionPipeline, TextualInversionLoade
                         guess_mode=guess_mode,
                         return_dict=False,
                         image_encoder_hidden_states = ram_encoder_hidden_states,
+                        added_cond_kwargs={"scale": _scale_for_cn} if _scale_for_cn is not None else None,
                     )
 
 
@@ -1058,6 +1100,7 @@ class StableDiffusionControlNetPipeline(DiffusionPipeline, TextualInversionLoade
                         mid_block_additional_residual=mid_block_res_sample,
                         return_dict=False,
                         image_encoder_hidden_states = ram_encoder_hidden_states,
+                        added_cond_kwargs={"scale": scale_full} if scale_full is not None else None, # add
                     )[0]
                 else:
                     tile_weights = self._gaussian_weights(tile_size, tile_size, 1)
@@ -1112,6 +1155,27 @@ class StableDiffusionControlNetPipeline(DiffusionPipeline, TextualInversionLoade
                                 img_list_t = torch.cat(img_list, dim=0)
                                 #print(input_list_t.shape, cond_list_t.shape, img_list_t.shape, fg_mask_list_t.shape)
 
+                                # 为本 tile 组构造 scale（长度 = 当前 tile 组的 batch）
+                                tile_bs = cond_list_t.shape[0]
+                                if scale_base is None:
+                                    tile_scale_base = None
+                                    tile_scale_full = None
+                                else:
+                                    if scale_base.numel() == tile_bs:
+                                        tile_scale_base = scale_base
+                                    elif scale_base.numel() > tile_bs:
+                                        tile_scale_base = scale_base[:tile_bs]
+                                    else:
+                                        rep = int(np.ceil(tile_bs / float(scale_base.numel())))
+                                        tile_scale_base = scale_base.repeat(rep)[:tile_bs]
+
+                                    tile_scale_full = (
+                                        torch.cat([tile_scale_base, tile_scale_base], dim=0)
+                                        if (do_classifier_free_guidance and not guess_mode)
+                                        else tile_scale_base
+                                    )
+
+
                                 down_block_res_samples, mid_block_res_sample = self.controlnet(
                                     cond_list_t,
                                     t,
@@ -1121,6 +1185,8 @@ class StableDiffusionControlNetPipeline(DiffusionPipeline, TextualInversionLoade
                                     guess_mode=guess_mode,
                                     return_dict=False,
                                     image_encoder_hidden_states = ram_encoder_hidden_states,
+                                    added_cond_kwargs={"scale": (tile_scale_base if (guess_mode and do_classifier_free_guidance) else tile_scale_full)
+                                    } if (tile_scale_base is not None) else None,  # add
                                 )
 
                                 if guess_mode and do_classifier_free_guidance:
@@ -1140,6 +1206,7 @@ class StableDiffusionControlNetPipeline(DiffusionPipeline, TextualInversionLoade
                                     mid_block_additional_residual=mid_block_res_sample,
                                     return_dict=False,
                                     image_encoder_hidden_states = ram_encoder_hidden_states,
+                                    added_cond_kwargs={"scale": tile_scale_full} if (tile_scale_full is not None) else None,  # add
                                 )[0]
 
                                 #for sample_i in range(model_out.size(0)):

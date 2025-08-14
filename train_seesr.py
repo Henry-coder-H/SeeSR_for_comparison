@@ -21,13 +21,14 @@ import transformers
 from accelerate import Accelerator
 from accelerate.logging import get_logger
 from accelerate.utils import ProjectConfiguration, set_seed
-from datasets import load_dataset # ''datasets'' is a library
+# from datasets import load_dataset # ''datasets'' is a library
 from huggingface_hub import create_repo, upload_folder
 from packaging import version
 from PIL import Image
 from torchvision import transforms
 from tqdm.auto import tqdm
 from transformers import AutoTokenizer, PretrainedConfig
+from diffusers.models.embeddings import ScaleTimeEmbedding
 
 import diffusers
 from diffusers import (
@@ -176,21 +177,49 @@ def log_validation(vae, text_encoder, tokenizer, unet, controlnet, args, acceler
         return image_logs
 
 
+# def import_model_class_from_model_name_or_path(pretrained_model_name_or_path: str, revision: str):
+#     text_encoder_config = PretrainedConfig.from_pretrained(
+#         pretrained_model_name_or_path,
+#         subfolder="text_encoder",
+#         revision=revision,
+#     )
+#     model_class = text_encoder_config.architectures[0]
+
+#     if model_class == "CLIPTextModel":
+#         from transformers import CLIPTextModel
+
+#         return CLIPTextModel
+#     elif model_class == "RobertaSeriesModelWithTransformation":
+#         from diffusers.pipelines.alt_diffusion.modeling_roberta_series import RobertaSeriesModelWithTransformation
+
+#         return RobertaSeriesModelWithTransformation
+#     else:
+#         raise ValueError(f"{model_class} is not supported.")
+
+# 和上面那个load tokenizer一样，强制用本地模型不然debug会报错
 def import_model_class_from_model_name_or_path(pretrained_model_name_or_path: str, revision: str):
+    # 如果路径是ckpt文件，直接替换成转换好的本地模型路径
+    if pretrained_model_name_or_path.endswith(".ckpt"):
+        pretrained_model_name_or_path = "/data4/huangsiyu/SeeSR/preset/models/stable-diffusion-2-base"
+
+    # 如果路径不存在 config.json，也强制换成本地路径
+    if not os.path.exists(os.path.join(pretrained_model_name_or_path, "config.json")):
+        pretrained_model_name_or_path = "/data4/huangsiyu/SeeSR/preset/models/stable-diffusion-2-base"
+
+    # 正常加载
     text_encoder_config = PretrainedConfig.from_pretrained(
         pretrained_model_name_or_path,
         subfolder="text_encoder",
         revision=revision,
+        local_files_only=True  # 强制只用本地文件
     )
     model_class = text_encoder_config.architectures[0]
 
     if model_class == "CLIPTextModel":
         from transformers import CLIPTextModel
-
         return CLIPTextModel
     elif model_class == "RobertaSeriesModelWithTransformation":
         from diffusers.pipelines.alt_diffusion.modeling_roberta_series import RobertaSeriesModelWithTransformation
-
         return RobertaSeriesModelWithTransformation
     else:
         raise ValueError(f"{model_class} is not supported.")
@@ -646,51 +675,148 @@ if accelerator.is_main_process:
         ).repo_id
 
 # Load the tokenizer
-if args.tokenizer_name:
-    tokenizer = AutoTokenizer.from_pretrained(args.tokenizer_name, revision=args.revision, use_fast=False)
-elif args.pretrained_model_name_or_path:
-    tokenizer = AutoTokenizer.from_pretrained(
-        args.pretrained_model_name_or_path,
-        subfolder="tokenizer",
-        revision=args.revision,
-        use_fast=False,
-    )
+# if args.tokenizer_name:
+#     tokenizer = AutoTokenizer.from_pretrained(args.tokenizer_name, revision=args.revision, use_fast=False)
+# elif args.pretrained_model_name_or_path:
+#     tokenizer = AutoTokenizer.from_pretrained(
+#         args.pretrained_model_name_or_path,
+#         subfolder="tokenizer",
+#         revision=args.revision,
+#         use_fast=False,
+#     )
+
+# Load the tokenizer(强制本地优先，不然debug会报错)
+# 先看环境变量
+tok_path = os.environ.get("SEE_SR_TOKENIZER_PATH", "").strip()
+
+if not tok_path:
+    # 如果没设置环境变量，就从 pretrained_model_name_or_path 推导
+    if os.path.isfile(args.pretrained_model_name_or_path):
+        # 是 .ckpt 文件 → 用固定的本地 tokenizer 目录
+        tok_path = "/data4/huangsiyu/SeeSR/preset/models/stable-diffusion-2-base/tokenizer"
+    else:
+        # 可能是本地模型目录
+        tok_path = os.path.join(args.pretrained_model_name_or_path, "tokenizer")
+
+if not os.path.isdir(tok_path):
+    raise RuntimeError(f"本地 tokenizer 路径不存在: {tok_path}")
+
+tokenizer = AutoTokenizer.from_pretrained(tok_path, local_files_only=True, use_fast=False)
+
+
+
 
 # import correct text encoder class
 text_encoder_cls = import_model_class_from_model_name_or_path(args.pretrained_model_name_or_path, args.revision)
 
+# 下面的还是一样
 # Load scheduler and models
-noise_scheduler = DDPMScheduler.from_pretrained(args.pretrained_model_name_or_path, subfolder="scheduler")
+# noise_scheduler = DDPMScheduler.from_pretrained(args.pretrained_model_name_or_path, subfolder="scheduler")
+# text_encoder = text_encoder_cls.from_pretrained(
+#     args.pretrained_model_name_or_path, subfolder="text_encoder", revision=args.revision
+# )
+# vae = AutoencoderKL.from_pretrained(args.pretrained_model_name_or_path, subfolder="vae", revision=args.revision)
+# # unet = UNet2DConditionModel.from_pretrained(
+# #     args.pretrained_model_name_or_path, subfolder="unet", revision=args.revision
+# # )
+# if args.unet_model_name_or_path:
+#     # resume from self-train
+#     logger.info("Loading unet weights from self-train")
+#     unet = UNet2DConditionModel.from_pretrained_orig(
+#         args.pretrained_model_name_or_path, args.unet_model_name_or_path, subfolder="unet", revision=args.revision, use_image_cross_attention=False # 源代码是True
+#     )
+# else:
+#     # resume from pretrained SD
+#     logger.info("Loading unet weights from SD")
+#     unet = UNet2DConditionModel.from_pretrained(
+#         args.pretrained_model_name_or_path, subfolder="unet", revision=args.revision, use_image_cross_attention=False # 源代码是True
+#     )
+#     print(f'===== if use ram encoder? {unet.config.use_image_cross_attention}')
+
+# if args.controlnet_model_name_or_path:
+#     # resume from self-train
+#     logger.info("Loading existing controlnet weights")
+#     controlnet = ControlNetModel.from_pretrained(args.controlnet_model_name_or_path, subfolder="controlnet")
+
+# else:
+#     logger.info("Initializing controlnet weights from unet")
+#     controlnet = ControlNetModel.from_unet(unet, use_image_cross_attention=False) # 源代码是True
+
+# ====== 强制使用本地 stable-diffusion 模型路径 ======
+LOCAL_SD_PATH = "/data4/huangsiyu/SeeSR/preset/models/stable-diffusion-2-base"
+if not os.path.exists(LOCAL_SD_PATH):
+    raise FileNotFoundError(f"本地模型路径不存在: {LOCAL_SD_PATH}")
+
+# 检查必须的子目录
+required_subfolders = {
+    "scheduler": "scheduler_config.json",
+    "text_encoder": "config.json",
+    "vae": "config.json",
+    "unet": "config.json",
+}
+for sub, cfg in required_subfolders.items():
+    cfg_path = os.path.join(LOCAL_SD_PATH, sub, cfg)
+    if not os.path.exists(cfg_path):
+        raise FileNotFoundError(f"{sub} 缺少 {cfg}，请检查模型是否完整: {cfg_path}")
+
+args.pretrained_model_name_or_path = LOCAL_SD_PATH
+
+# ====== Load scheduler and models ======
+noise_scheduler = DDPMScheduler.from_pretrained(
+    args.pretrained_model_name_or_path, subfolder="scheduler"
+)
+
 text_encoder = text_encoder_cls.from_pretrained(
     args.pretrained_model_name_or_path, subfolder="text_encoder", revision=args.revision
 )
-vae = AutoencoderKL.from_pretrained(args.pretrained_model_name_or_path, subfolder="vae", revision=args.revision)
-# unet = UNet2DConditionModel.from_pretrained(
-#     args.pretrained_model_name_or_path, subfolder="unet", revision=args.revision
-# )
+
+vae = AutoencoderKL.from_pretrained(
+    args.pretrained_model_name_or_path, subfolder="vae", revision=args.revision
+)
+
 if args.unet_model_name_or_path:
-    # resume from self-train
     logger.info("Loading unet weights from self-train")
     unet = UNet2DConditionModel.from_pretrained_orig(
-        args.pretrained_model_name_or_path, args.unet_model_name_or_path, subfolder="unet", revision=args.revision, use_image_cross_attention=True
+        args.pretrained_model_name_or_path,
+        args.unet_model_name_or_path,
+        subfolder="unet",
+        revision=args.revision,
+        use_image_cross_attention=False
     )
 else:
-    # resume from pretrained SD
-    logger.info("Loading unet weights from SD")
+    logger.info("Loading unet weights from SD (本地)")
     unet = UNet2DConditionModel.from_pretrained(
-        args.pretrained_model_name_or_path, subfolder="unet", revision=args.revision, use_image_cross_attention=True
+        args.pretrained_model_name_or_path,
+        subfolder="unet",
+        revision=args.revision,
+        use_image_cross_attention=False
     )
     print(f'===== if use ram encoder? {unet.config.use_image_cross_attention}')
 
 if args.controlnet_model_name_or_path:
-    # resume from self-train
     logger.info("Loading existing controlnet weights")
-    controlnet = ControlNetModel.from_pretrained(args.controlnet_model_name_or_path, subfolder="controlnet")
-
+    controlnet = ControlNetModel.from_pretrained(
+        args.controlnet_model_name_or_path, subfolder="controlnet"
+    )
 else:
     logger.info("Initializing controlnet weights from unet")
-    controlnet = ControlNetModel.from_unet(unet, use_image_cross_attention=True)
-    
+    controlnet = ControlNetModel.from_unet(unet, use_image_cross_attention=False)
+
+# 计算 time_embed_dim（对 UNet 与 ControlNet 都等价 = block_out_channels[0] * 4）
+time_embed_dim_unet = unet.time_embedding.linear_1.out_features
+time_embed_dim_ctrl = controlnet.time_embedding.linear_1.out_features
+
+# 让 config 里记录 addition_embed_type='scale'，保存/加载时也能带上
+unet.register_to_config(addition_embed_type="scale")
+controlnet.register_to_config(addition_embed_type="scale")
+
+# 实例化并挂到模型上（因为 from_pretrained 已经构造完成，这里手动“后挂载”）
+unet.add_embedding = ScaleTimeEmbedding(
+    time_embed_dim=time_embed_dim_unet, rope_dim=128, rope_base=10000.0, use_norm=True
+)
+controlnet.add_embedding = ScaleTimeEmbedding(
+    time_embed_dim=time_embed_dim_ctrl, rope_dim=128, rope_base=10000.0, use_norm=True
+)
 
 # `accelerate` 0.16.0 will have better support for customized saving
 if version.parse(accelerate.__version__) >= version.parse("0.16.0"):
@@ -746,6 +872,10 @@ if version.parse(accelerate.__version__) >= version.parse("0.16.0"):
 vae.requires_grad_(False)
 unet.requires_grad_(False)
 text_encoder.requires_grad_(False)
+# 让 UNet 的 RoPE-Scale 分支参与训练
+for p in unet.add_embedding.parameters():
+    p.requires_grad = True
+
 controlnet.train()
 
 ## release the cross-attention part in the unet.
@@ -995,6 +1125,26 @@ for epoch in range(first_epoch, args.num_train_epochs):
                 ram_image = batch["ram_values"].to(accelerator.device, dtype=weight_dtype)
                 ram_encoder_hidden_states = RAM.generate_image_embeds(ram_image)
 
+           # --- build per-batch scale tensor (必须来自 Dataset) ---
+            B = noisy_latents.shape[0]
+
+            if "scale" not in batch:
+                raise RuntimeError(
+                    "Dataset must return 'scale' for continuous SR. "
+                    "Please update PairedCaptionDataset to provide example['scale']."
+                )
+
+            # (B,) float, 放到同一 device/dtype
+            scale = batch["scale"].to(device=noisy_latents.device, dtype=weight_dtype).view(-1)
+
+            # 可选：做个范围约束，避免极端值影响训练
+            scale = scale.clamp(1.0 / 64.0, 64.0)
+
+            # 可选：首步打印检查
+            if global_step == 0 and accelerator.is_main_process:
+                logger.info(f"sample scales (first few): {scale[:4].detach().cpu().tolist()}")
+
+
             down_block_res_samples, mid_block_res_sample = controlnet(
                 noisy_latents,
                 timesteps,
@@ -1002,6 +1152,7 @@ for epoch in range(first_epoch, args.num_train_epochs):
                 controlnet_cond=controlnet_image,
                 return_dict=False,
                 image_encoder_hidden_states=ram_encoder_hidden_states,
+                added_cond_kwargs={"scale": scale},   # 把 scale 传进 ControlNet
             )
 
             # Predict the noise residual
@@ -1014,6 +1165,7 @@ for epoch in range(first_epoch, args.num_train_epochs):
                 ],
                 mid_block_additional_residual=mid_block_res_sample.to(dtype=weight_dtype),
                 image_encoder_hidden_states=ram_encoder_hidden_states,
+                added_cond_kwargs={"scale": scale},   # 把 scale 传进 ControlNet
             ).sample       
 
             # Get the target for loss depending on the prediction type

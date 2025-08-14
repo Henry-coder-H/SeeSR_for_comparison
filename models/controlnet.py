@@ -22,7 +22,7 @@ from diffusers.configuration_utils import ConfigMixin, register_to_config
 from diffusers.loaders import FromOriginalControlnetMixin
 from diffusers.utils import BaseOutput, logging
 from diffusers.models.attention_processor import AttentionProcessor, AttnProcessor
-from diffusers.models.embeddings import TextImageProjection, TextImageTimeEmbedding, TextTimeEmbedding, TimestepEmbedding, Timesteps
+from diffusers.models.embeddings import TextImageProjection, TextImageTimeEmbedding, TextTimeEmbedding, TimestepEmbedding, Timesteps, ScaleTimeEmbedding, rope_scalar_embedding
 from diffusers.models.modeling_utils import ModelMixin
 from .unet_2d_blocks import (
     CrossAttnDownBlock2D,
@@ -327,6 +327,17 @@ class ControlNetModel(ModelMixin, ConfigMixin, FromOriginalControlnetMixin):
         elif addition_embed_type == "text_time":
             self.add_time_proj = Timesteps(addition_time_embed_dim, flip_sin_to_cos, freq_shift)
             self.add_embedding = TimestepEmbedding(projection_class_embeddings_input_dim, time_embed_dim)
+
+        # 此处为我添加的scale部分
+        elif addition_embed_type == "scale":
+            # 这里 time_embed_dim 是你现有UNet里用于timestep embedding的维度
+            # 可选：把rope_dim/rope_base做成config字段或init参数
+            self.add_embedding = ScaleTimeEmbedding(
+                time_embed_dim=time_embed_dim,   # 和timestep embedding相同维度，方便相加
+                rope_dim=128,
+                rope_base=10000.0,
+                use_norm=True,
+            )
 
         elif addition_embed_type is not None:
             raise ValueError(f"addition_embed_type: {addition_embed_type} must be None, 'text' or 'text_image'.")
@@ -751,6 +762,21 @@ class ControlNetModel(ModelMixin, ConfigMixin, FromOriginalControlnetMixin):
                 add_embeds = torch.concat([text_embeds, time_embeds], dim=-1)
                 add_embeds = add_embeds.to(emb.dtype)
                 aug_emb = self.add_embedding(add_embeds)
+
+            # add
+            elif self.config.addition_embed_type == "scale":
+                if added_cond_kwargs is None or "scale" not in added_cond_kwargs:
+                    raise ValueError("addition_embed_type='scale' 需要在 added_cond_kwargs 中提供 'scale'")
+
+                scale = added_cond_kwargs["scale"]
+                # 支持 float/int/(B,)/(B,1)，并对齐设备/精度/形状
+                if not torch.is_tensor(scale):
+                    scale = torch.tensor([scale], device=sample.device, dtype=emb.dtype).expand(sample.shape[0])
+                else:
+                    scale = scale.to(device=sample.device, dtype=emb.dtype)
+                    scale = scale.view(sample.shape[0])  # (B,)
+
+                aug_emb = self.add_embedding(scale)
 
         emb = emb + aug_emb if aug_emb is not None else emb
 

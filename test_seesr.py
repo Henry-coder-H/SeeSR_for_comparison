@@ -112,6 +112,7 @@ def load_seesr_pipeline(args, accelerator, enable_xformers_memory_efficient_atte
     elif accelerator.mixed_precision == "bf16":
         weight_dtype = torch.bfloat16
 
+
     # Move text_encode and vae to gpu and cast to weight_dtype
     text_encoder.to(accelerator.device, dtype=weight_dtype)
     vae.to(accelerator.device, dtype=weight_dtype)
@@ -192,22 +193,50 @@ def main(args, enable_xformers_memory_efficient_attention=True,):
                 file.close()
             print(f'{validation_prompt}')
 
-            ori_width, ori_height = validation_image.size
-            resize_flag = False
-            rscale = args.upscale
-            if ori_width < args.process_size//rscale or ori_height < args.process_size//rscale:
-                scale = (args.process_size//rscale)/min(ori_width, ori_height)
-                tmp_image = validation_image.resize((int(scale*ori_width), int(scale*ori_height)))
+            # ori_width, ori_height = validation_image.size
+            # resize_flag = False
+            # rscale = args.upscale
+            # if ori_width < args.process_size//rscale or ori_height < args.process_size//rscale:
+            #     scale = (args.process_size//rscale)/min(ori_width, ori_height)
+            #     tmp_image = validation_image.resize((int(scale*ori_width), int(scale*ori_height)))
 
-                validation_image = tmp_image
+            #     validation_image = tmp_image
+            #     resize_flag = True
+
+            # validation_image = validation_image.resize((validation_image.size[0]*rscale, validation_image.size[1]*rscale))
+            # validation_image = validation_image.resize((validation_image.size[0]//8*8, validation_image.size[1]//8*8))
+            # width, height = validation_image.size
+            # resize_flag = True #
+
+            # print(f'input size: {height}x{width}')
+
+            ori_width, ori_height = validation_image.size
+            rscale = float(args.upscale)
+            resize_flag = False
+
+            # 若图太小，先把最短边增大到 process_size / rscale
+            min_needed = args.process_size / rscale
+            if min(ori_width, ori_height) < min_needed:
+                factor = min_needed / min(ori_width, ori_height)
+                new_w = max(1, int(round(ori_width * factor)))
+                new_h = max(1, int(round(ori_height * factor)))
+                validation_image = validation_image.resize((new_w, new_h), Image.BICUBIC)
                 resize_flag = True
 
-            validation_image = validation_image.resize((validation_image.size[0]*rscale, validation_image.size[1]*rscale))
-            validation_image = validation_image.resize((validation_image.size[0]//8*8, validation_image.size[1]//8*8))
-            width, height = validation_image.size
-            resize_flag = True #
+            # 再按浮点倍率放大
+            new_w = max(1, int(round(validation_image.width  * rscale)))
+            new_h = max(1, int(round(validation_image.height * rscale)))
+            validation_image = validation_image.resize((new_w, new_h), Image.BICUBIC)
+
+            # 对齐到 8 的倍数
+            width  = max(8, int(round(validation_image.width  / 8.0)) * 8)
+            height = max(8, int(round(validation_image.height / 8.0)) * 8)
+            if (width != validation_image.width) or (height != validation_image.height):
+                validation_image = validation_image.resize((width, height), Image.BICUBIC)
+                resize_flag = True
 
             print(f'input size: {height}x{width}')
+
 
             for sample_idx in range(args.sample_times):
                 os.makedirs(f'{args.output_dir}/sample{str(sample_idx).zfill(2)}/', exist_ok=True)
@@ -219,7 +248,7 @@ def main(args, enable_xformers_memory_efficient_attention=True,):
                             guidance_scale=args.guidance_scale, negative_prompt=negative_prompt, conditioning_scale=args.conditioning_scale,
                             start_point=args.start_point, ram_encoder_hidden_states=ram_encoder_hidden_states,
                             latent_tiled_size=args.latent_tiled_size, latent_tiled_overlap=args.latent_tiled_overlap,
-                            args=args,
+                            args=args,scale_value=float(rscale),
                         ).images[0]
                 
                 if args.align_method == 'nofix':
@@ -257,7 +286,8 @@ if __name__ == "__main__":
     parser.add_argument("--vae_encoder_tiled_size", type=int, default=1024) # image size, for 13G
     parser.add_argument("--latent_tiled_size", type=int, default=96) 
     parser.add_argument("--latent_tiled_overlap", type=int, default=32) 
-    parser.add_argument("--upscale", type=int, default=4)
+    # parser.add_argument("--upscale", type=int, default=4)
+    parser.add_argument("--upscale",type=float,default=4.0)
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--sample_times", type=int, default=1)
     parser.add_argument("--align_method", type=str, choices=['wavelet', 'adain', 'nofix'], default='adain')
