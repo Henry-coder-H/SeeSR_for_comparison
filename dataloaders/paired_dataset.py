@@ -5,6 +5,7 @@ from PIL import Image
 import random
 import numpy as np
 import re
+import math
 
 import torch
 from torch import nn
@@ -20,6 +21,9 @@ class PairedCaptionDataset(data.Dataset):
             root_folders=None,
             tokenizer=None,
             null_text_ratio=0.5,
+            use_log_scale=True,
+            min_scale=1/16,
+            max_scale=1.0,
             # use_ram_encoder=False,
             # use_gt_caption=False,
             # caption_type = 'gt_caption',
@@ -27,6 +31,14 @@ class PairedCaptionDataset(data.Dataset):
         super(PairedCaptionDataset, self).__init__()
 
         self.null_text_ratio = null_text_ratio
+        self.use_log_scale = use_log_scale
+        self.min_scale = min_scale
+        self.max_scale = max_scale
+        
+        # Log-scale sampling parameters
+        if self.use_log_scale:
+            self.log_min_scale = math.log(min_scale)
+            self.log_max_scale = math.log(max_scale)
         # self.lr_list = []
         # self.gt_list = []
         # self.tag_path_list = []
@@ -175,8 +187,14 @@ class PairedCaptionDataset(data.Dataset):
             with open(tag_path, 'r') as f:
                 tag = f.read()
 
-        # 关键：直接用 meta 里的倍率
-        scale = torch.tensor(self.scale_list[index], dtype=torch.float32)
+        # 关键：处理scale，现在meta文件中保存的就是log-scale值
+        if self.use_log_scale:
+            # 直接使用meta中的log-scale值
+            scale = torch.tensor(self.scale_list[index], dtype=torch.float32)
+        else:
+            # 如果meta中保存的是原始scale值，转换为log-scale
+            original_scale = self.scale_list[index]
+            scale = torch.tensor(math.log(original_scale), dtype=torch.float32)
 
         example = dict()
         example["conditioning_pixel_values"] = lq_up_img                 # (C,H,W)

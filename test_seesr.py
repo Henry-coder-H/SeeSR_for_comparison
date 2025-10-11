@@ -10,6 +10,7 @@ import cv2
 import glob
 import argparse
 import numpy as np
+import math
 from PIL import Image
 
 import torch
@@ -211,7 +212,8 @@ def main(args, enable_xformers_memory_efficient_attention=True,):
             # print(f'input size: {height}x{width}')
 
             ori_width, ori_height = validation_image.size
-            rscale = float(args.upscale)
+            rscale = float(args.upscale)  # 原始scale值，用于resize
+            rscale_log = math.log(rscale)  # log-scale值，用于模型输入
             resize_flag = False
 
             # 若图太小，先把最短边增大到 process_size / rscale
@@ -248,7 +250,7 @@ def main(args, enable_xformers_memory_efficient_attention=True,):
                             guidance_scale=args.guidance_scale, negative_prompt=negative_prompt, conditioning_scale=args.conditioning_scale,
                             start_point=args.start_point, ram_encoder_hidden_states=ram_encoder_hidden_states,
                             latent_tiled_size=args.latent_tiled_size, latent_tiled_overlap=args.latent_tiled_overlap,
-                            args=args,scale_value=float(rscale),
+                            args=args,scale_value=float(rscale_log),
                         ).images[0]
                 
                 if args.align_method == 'nofix':

@@ -955,10 +955,11 @@ class StableDiffusionControlNetPipeline(DiffusionPipeline, TextualInversionLoade
 
         # add
         # Prepare scale tensor (支持 float 或 tensor；自动对齐 batch 并处理 CFG 拼接)
-        def _make_scale_base(val, device, dtype, base_bs: int) -> Optional[torch.Tensor]:
+        def _make_scale_base(val, device, dtype, base_bs: int, use_log_scale: bool = True) -> Optional[torch.Tensor]:
             """
             返回 shape=(base_bs,) 的一维张量；若 val=None 则返回 None。
             base_bs = batch_size * num_images_per_prompt（未做 CFG 拼接）
+            use_log_scale: 如果为True，假设输入的是log-scale值；如果为False，将输入转换为log-scale
             """
             if val is None:
                 return None
@@ -966,6 +967,10 @@ class StableDiffusionControlNetPipeline(DiffusionPipeline, TextualInversionLoade
                 t = val.to(device=device, dtype=dtype).view(-1)
             else:
                 t = torch.tensor([float(val)], device=device, dtype=dtype).view(-1)
+
+            # 如果不是log-scale，转换为log-scale
+            if not use_log_scale:
+                t = torch.log(t)
 
             if t.numel() == 1:
                 t = t.repeat(base_bs)
@@ -979,7 +984,7 @@ class StableDiffusionControlNetPipeline(DiffusionPipeline, TextualInversionLoade
         _dtype  = prompt_embeds.dtype                         # 与 UNet/latents 一致
         _device = self._execution_device
 
-        scale_base = _make_scale_base(scale_value, _device, _dtype, base_bs)  # (base_bs,) 或 None
+        scale_base = _make_scale_base(scale_value, _device, _dtype, base_bs, use_log_scale=True)  # (base_bs,) 或 None
         # 对于非 guess_mode 的 CFG，要把 scale 也做 uncond/cond 拼接
         if scale_base is None:
             scale_full = None

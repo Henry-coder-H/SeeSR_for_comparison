@@ -34,9 +34,10 @@ from diffusers.models.embeddings import (
     TextTimeEmbedding,
     TimestepEmbedding,
     Timesteps,
-    ScaleTimeEmbedding, # add
+    # ScaleTimeEmbedding, # add - now imported from local module
 )
 from diffusers.models.modeling_utils import ModelMixin
+from .scale_embedding import ScaleTimeEmbedding
 from .unet_2d_blocks import (
     UNetMidBlock2DCrossAttn,
     UNetMidBlock2DSimpleCrossAttn,

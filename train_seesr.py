@@ -28,7 +28,7 @@ from PIL import Image
 from torchvision import transforms
 from tqdm.auto import tqdm
 from transformers import AutoTokenizer, PretrainedConfig
-from diffusers.models.embeddings import ScaleTimeEmbedding
+from models.scale_embedding import ScaleTimeEmbedding, LogScaleSampler
 
 import diffusers
 from diffusers import (
@@ -976,6 +976,9 @@ optimizer = optimizer_class(
 train_dataset = PairedCaptionDataset(root_folders=args.root_folders,
                                     tokenizer=tokenizer,
                                     null_text_ratio=args.null_text_ratio,
+                                    use_log_scale=True,
+                                    min_scale=1/16,
+                                    max_scale=1.0,
 )
 
 train_dataloader = torch.utils.data.DataLoader(
@@ -1135,14 +1138,15 @@ for epoch in range(first_epoch, args.num_train_epochs):
                 )
 
             # (B,) float, 放到同一 device/dtype
-            scale = batch["scale"].to(device=noisy_latents.device, dtype=weight_dtype).view(-1)
+            scale_log = batch["scale"].to(device=noisy_latents.device, dtype=weight_dtype).view(-1)
 
-            # 可选：做个范围约束，避免极端值影响训练
-            scale = scale.clamp(1.0 / 64.0, 64.0)
+            # 对于log-scale，范围约束在log空间 [log(1/16), 0]
+            scale_log = scale_log.clamp(math.log(1.0 / 16.0), 0.0)
 
             # 可选：首步打印检查
             if global_step == 0 and accelerator.is_main_process:
-                logger.info(f"sample scales (first few): {scale[:4].detach().cpu().tolist()}")
+                logger.info(f"sample log-scales (first few): {scale_log[:4].detach().cpu().tolist()}")
+                logger.info(f"sample original scales (first few): {torch.exp(scale_log[:4]).detach().cpu().tolist()}")
 
 
             down_block_res_samples, mid_block_res_sample = controlnet(
@@ -1152,7 +1156,7 @@ for epoch in range(first_epoch, args.num_train_epochs):
                 controlnet_cond=controlnet_image,
                 return_dict=False,
                 image_encoder_hidden_states=ram_encoder_hidden_states,
-                added_cond_kwargs={"scale": scale},   # 把 scale 传进 ControlNet
+                added_cond_kwargs={"scale": scale_log},   # 把 log-scale 传进 ControlNet
             )
 
             # Predict the noise residual
@@ -1165,7 +1169,7 @@ for epoch in range(first_epoch, args.num_train_epochs):
                 ],
                 mid_block_additional_residual=mid_block_res_sample.to(dtype=weight_dtype),
                 image_encoder_hidden_states=ram_encoder_hidden_states,
-                added_cond_kwargs={"scale": scale},   # 把 scale 传进 ControlNet
+                added_cond_kwargs={"scale": scale_log},   # 把 log-scale 传进 UNet
             ).sample       
 
             # Get the target for loss depending on the prediction type

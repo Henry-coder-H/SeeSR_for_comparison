@@ -10,6 +10,7 @@ import cv2
 import glob
 import argparse
 import numpy as np
+import math
 from PIL import Image
 
 import torch
@@ -194,7 +195,8 @@ def main(args, enable_xformers_memory_efficient_attention=True,):
 
             ori_width, ori_height = validation_image.size
             resize_flag = False
-            rscale = args.upscale
+            rscale = args.upscale  # 原始scale值，用于resize
+            rscale_log = math.log(rscale)  # log-scale值，用于模型输入
             if ori_width < args.process_size//rscale or ori_height < args.process_size//rscale:
                 scale = (args.process_size//rscale)/min(ori_width, ori_height)
                 tmp_image = validation_image.resize((int(scale*ori_width), int(scale*ori_height)))

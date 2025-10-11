@@ -12,6 +12,7 @@ python make_DIV2K_LR_anyscale.py \
   --split valid \
   --scales 1.2
 """
+# 这个文件用于生成目标图像集时的验证效果，比如DIV2k的验证集是4倍分辨率图像图像，可以将HR先变成1/scale 大小然后再做推理
 import os
 import glob
 import argparse

@@ -16,7 +16,7 @@ ram_transforms = transforms.Compose([
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--root_path", type=str, required=True,
-                    help="你的 SeeSR 训练对根目录，比如 preset/datasets/train_datasets/div2k")
+                    help="你的 SeeSR 训练对根目录，比如/data4/huangsiyu/SeeSR_baseline/preset/datasets/train_datasets/training_for_seesr")
 parser.add_argument("--start_gpu", type=int, default=0)
 parser.add_argument("--all_gpu", type=int, default=1)
 args = parser.parse_args()

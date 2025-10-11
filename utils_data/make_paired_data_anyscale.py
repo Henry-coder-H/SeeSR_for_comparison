@@ -4,6 +4,14 @@ SeeSR 任意倍率数据构建（基于 RealESRGAN 退化 + 连续 scale）
 输入：DIV2K 的 HR 目录
 输出：out_root/{gt, sr_bicubic} + scale_meta.jsonl（记录每张图的倍率）
 后续再跑打标签脚本得到 out_root/tag/*.txt
+
+注意：此脚本在log空间采样scale，然后转换为原始scale值进行图像处理
+log-scale采样范围：[log(1/16), 0] 对应原始scale范围：[1/16, 1.0]
+
+生成代码：CUDA_VISIBLE_DEVICES=0 python /data4/huangsiyu/SeeSR_baseline/utils_data/make_paired_data_anyscale.py \
+--hr_dir /data_center/data1/dataset/DIV2K/train/train_HR \
+--out_root /data4/huangsiyu/SeeSR_baseline/preset/datasets/train_datasets/training_for_seesr \
+--epoch 1
 """
 import os, sys, cv2, math, random, argparse, json
 sys.path.append(os.getcwd())
@@ -24,11 +32,11 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--hr_dir", type=str, required=True, help="DIV2K train_HR 目录")
 parser.add_argument("--out_root", type=str, required=True, help="输出根目录，例如 preset/datasets/train_datasets/div2k")
 parser.add_argument("--epoch", type=int, default=1)
-parser.add_argument("--batch_size", type=int, default=8)
-parser.add_argument("--num_workers", type=int, default=8)
-parser.add_argument("--gt_patch", type=int, default=512, help="GT patch size")
-parser.add_argument("--scale_min", type=float, default=1.3)
-parser.add_argument("--scale_max", type=float, default=4.0)
+parser.add_argument("--batch_size", type=int, default=2, help="smaller batch size means much time but more extensive degradation for making the training dataset.")
+parser.add_argument("--num_workers", type=int, default=4)
+parser.add_argument("--gt_patch", type=int, default=256, help="GT patch size")
+parser.add_argument("--log_scale_min", type=float, default=math.log(1/16), help="Minimum log-scale value (log(1/16) ≈ -2.77)")
+parser.add_argument("--log_scale_max", type=float, default=0.0, help="Maximum log-scale value (log(1) = 0)")
 parser.add_argument("--seed", type=int, default=42)
 args = parser.parse_args()
 
@@ -61,6 +69,9 @@ cfg_ds = dict(
     use_hflip=True,
     use_rot=False,
 )
+
+# 添加no_degradation_prob参数（与原版保持一致）
+cfg_ds['no_degradation_prob'] = 0.01
 train_dataset = RealESRGANDataset(cfg_ds)
 loader = DataLoader(train_dataset, shuffle=False, batch_size=args.batch_size,
                     num_workers=args.num_workers, drop_last=True)
@@ -85,6 +96,7 @@ cfg_deg = {
     "jpeg_range2": [30, 95],
 
     "gt_size": args.gt_patch,
+    "no_degradation_prob": 0.01,
 }
 
 # --------- output dirs ----------
@@ -105,66 +117,156 @@ jpeger = DiffJPEG(differentiable=False).cuda()
 usm  = USMSharp().cuda()
 
 def realesrgan_degradation_anyscale(batch, cfg_deg, sf_any: float):
-    """核心退化流程，最后强制把 LQ 回缩到 1/sf_any 尺寸，然后再裁出 patch 并双三次上采回 GT 尺寸保存。"""
-    gt = batch['gt'].cuda().to(memory_format=torch.contiguous_format).float()
-    gt = usm(gt)
-    k1, k2, sinc_k = batch['kernel1'].cuda(), batch['kernel2'].cuda(), batch['sinc_kernel'].cuda()
-    B, C, H, W = gt.shape
+    """核心退化流程，基于原版实现但支持任意倍率"""
+    jpeger = DiffJPEG(differentiable=False).cuda()
+    usm_sharpener = USMSharp().cuda()  # do usm sharpening
+    im_gt = batch['gt'].cuda()
+    im_gt = usm_sharpener(im_gt)
+    im_gt = im_gt.to(memory_format=torch.contiguous_format).float()
+    kernel1 = batch['kernel1'].cuda()
+    kernel2 = batch['kernel2'].cuda()
+    sinc_kernel = batch['sinc_kernel'].cuda()
 
-    # ---- 第一阶段 ----
-    out = filter2D(gt, k1)
-    updown = random.choices(['up','down','keep'], cfg_deg['resize_prob'])[0]
-    scale = random.uniform(1, cfg_deg['resize_range'][1]) if updown == 'up' else \
-            random.uniform(cfg_deg['resize_range'][0], 1) if updown == 'down' else 1.0
-    out = F.interpolate(out, scale_factor=scale, mode=random.choice(['area','bilinear','bicubic']))
+    ori_h, ori_w = im_gt.size()[2:4]
 
+    # ----------------------- The first degradation process ----------------------- #
+    # blur
+    out = filter2D(im_gt, kernel1)
+    # random resize
+    updown_type = random.choices(
+            ['up', 'down', 'keep'],
+            cfg_deg['resize_prob'],
+            )[0]
+    if updown_type == 'up':
+        scale = random.uniform(1, cfg_deg['resize_range'][1])
+    elif updown_type == 'down':
+        scale = random.uniform(cfg_deg['resize_range'][0], 1)
+    else:
+        scale = 1
+    mode = random.choice(['area', 'bilinear', 'bicubic'])
+    out = F.interpolate(out, scale_factor=scale, mode=mode)
+    # add noise
+    gray_noise_prob = cfg_deg['gray_noise_prob']
     if random.random() < cfg_deg['gaussian_noise_prob']:
-        out = random_add_gaussian_noise_pt(out, sigma_range=cfg_deg['noise_range'],
-                                           clip=True, rounds=False, gray_prob=cfg_deg['gray_noise_prob'])
+        out = random_add_gaussian_noise_pt(
+            out,
+            sigma_range=cfg_deg['noise_range'],
+            clip=True,
+            rounds=False,
+            gray_prob=gray_noise_prob,
+            )
     else:
-        out = random_add_poisson_noise_pt(out, scale_range=cfg_deg['poisson_scale_range'],
-                                          gray_prob=cfg_deg['gray_noise_prob'], clip=True, rounds=False)
-    out = torch.clamp(out, 0, 1)
-    out = jpeger(out, quality=out.new_zeros(out.size(0)).uniform_(*cfg_deg['jpeg_range']))
+        out = random_add_poisson_noise_pt(
+            out,
+            scale_range=cfg_deg['poisson_scale_range'],
+            gray_prob=gray_noise_prob,
+            clip=True,
+            rounds=False)
+    # JPEG compression
+    jpeg_p = out.new_zeros(out.size(0)).uniform_(*cfg_deg['jpeg_range'])
+    out = torch.clamp(out, 0, 1)  # clamp to [0, 1], otherwise JPEGer will result in unpleasant artifacts
+    out = jpeger(out, quality=jpeg_p)
 
-    # ---- 第二阶段 ----
+    # ----------------------- The second degradation process ----------------------- #
+    # blur
     if random.random() < cfg_deg['second_blur_prob']:
-        out = filter2D(out, k2)
-    updown = random.choices(['up','down','keep'], cfg_deg['resize_prob2'])[0]
-    scale2 = random.uniform(1, cfg_deg['resize_range2'][1]) if updown == 'up' else \
-             random.uniform(cfg_deg['resize_range2'][0], 1) if updown == 'down' else 1.0
-    out = F.interpolate(out, scale_factor=scale2, mode=random.choice(['area','bilinear','bicubic']))
-
+        out = filter2D(out, kernel2)
+    # random resize
+    updown_type = random.choices(
+            ['up', 'down', 'keep'],
+            cfg_deg['resize_prob2'],
+            )[0]
+    if updown_type == 'up':
+        scale = random.uniform(1, cfg_deg['resize_range2'][1])
+    elif updown_type == 'down':
+        scale = random.uniform(cfg_deg['resize_range2'][0], 1)
+    else:
+        scale = 1
+    mode = random.choice(['area', 'bilinear', 'bicubic'])
+    out = F.interpolate(
+            out,
+            size=(int(ori_h / sf_any * scale),
+                    int(ori_w / sf_any * scale)),
+            mode=mode,
+            )
+    # add noise
+    gray_noise_prob = cfg_deg['gray_noise_prob2']
     if random.random() < cfg_deg['gaussian_noise_prob2']:
-        out = random_add_gaussian_noise_pt(out, sigma_range=cfg_deg['noise_range2'],
-                                           clip=True, rounds=False, gray_prob=cfg_deg['gray_noise_prob2'])
+        out = random_add_gaussian_noise_pt(
+            out,
+            sigma_range=cfg_deg['noise_range2'],
+            clip=True,
+            rounds=False,
+            gray_prob=gray_noise_prob,
+            )
     else:
-        out = random_add_poisson_noise_pt(out, scale_range=cfg_deg['poisson_scale_range2'],
-                                          gray_prob=cfg_deg['gray_noise_prob2'], clip=True, rounds=False)
+        out = random_add_poisson_noise_pt(
+            out,
+            scale_range=cfg_deg['poisson_scale_range2'],
+            gray_prob=gray_noise_prob,
+            clip=True,
+            rounds=False,
+            )
 
-    # ---- 最终回缩到 “任意倍率” 的 LQ 尺寸（以整图为基准）----
-    tgt_h = max(8, int(round(H / float(sf_any))))
-    tgt_w = max(8, int(round(W / float(sf_any))))
+    # JPEG compression + the final sinc filter
+    # We also need to resize images to desired sizes. We group [resize back + sinc filter] together
+    # as one operation.
+    # We consider two orders:
+    #   1. [resize back + sinc filter] + JPEG compression
+    #   2. JPEG compression + [resize back + sinc filter]
+    # Empirically, we find other combinations (sinc + JPEG + Resize) will introduce twisted lines.
     if random.random() < 0.5:
-        out = F.interpolate(out, size=(tgt_h, tgt_w), mode=random.choice(['area','bilinear','bicubic']))
-        out = filter2D(out, sinc_k)
+        # resize back + the final sinc filter
+        mode = random.choice(['area', 'bilinear', 'bicubic'])
+        out = F.interpolate(
+                out,
+                size=(int(ori_h // sf_any),
+                        int(ori_w // sf_any)),
+                mode=mode,
+                )
+        out = filter2D(out, sinc_kernel)
+        # JPEG compression
+        jpeg_p = out.new_zeros(out.size(0)).uniform_(*cfg_deg['jpeg_range2'])
         out = torch.clamp(out, 0, 1)
-        out = jpeger(out, quality=out.new_zeros(out.size(0)).uniform_(*cfg_deg['jpeg_range2']))
+        out = jpeger(out, quality=jpeg_p)
     else:
+        # JPEG compression
+        jpeg_p = out.new_zeros(out.size(0)).uniform_(*cfg_deg['jpeg_range2'])
         out = torch.clamp(out, 0, 1)
-        out = jpeger(out, quality=out.new_zeros(out.size(0)).uniform_(*cfg_deg['jpeg_range2']))
-        out = F.interpolate(out, size=(tgt_h, tgt_w), mode=random.choice(['area','bilinear','bicubic']))
-        out = filter2D(out, sinc_k)
+        out = jpeger(out, quality=jpeg_p)
+        # resize back + the final sinc filter
+        mode = random.choice(['area', 'bilinear', 'bicubic'])
+        out = F.interpolate(
+                out,
+                size=(int(ori_h // sf_any),
+                        int(ori_w // sf_any)),
+                mode=mode,
+                )
+        out = filter2D(out, sinc_kernel)
 
-    lq = torch.clamp(out, 0, 1.0)
-    return lq, gt  # 后面保存前再各自做 patch + 上采样
+    # clamp and round
+    im_lq = torch.clamp(out, 0, 1.0)
+    im_gt = torch.clamp(im_gt, 0, 1)
+
+    # 清理中间变量
+    del out, kernel1, kernel2, sinc_kernel
+    torch.cuda.empty_cache()
+
+    return im_lq, im_gt
         
 
 step = 0
 with open(meta_path, "a") as meta_f:
     for ep in range(args.epoch):
-        for batch in tqdm(loader, desc=f"Epoch {ep+1}/{args.epoch}"):
-            sf_any = random.uniform(args.scale_min, args.scale_max)  # 本批次的连续倍率
+        for batch_idx, batch in enumerate(tqdm(loader, desc=f"Epoch {ep+1}/{args.epoch}")):
+            # 每处理几个batch就清理一次显存
+            if batch_idx % 5 == 0:
+                torch.cuda.empty_cache()
+            
+            # 在log空间均匀采样
+            log_scale = random.uniform(args.log_scale_min, args.log_scale_max)
+            # 转换为原始scale值用于图像处理
+            sf_any = math.exp(log_scale)
             lq_full, gt_full = realesrgan_degradation_anyscale(batch, cfg_deg, sf_any)
 
             # 为保存成训练对：从 LQ/GT 各裁一个随机 patch，并把 LQ 双三次上采回 GT 尺寸，作为 sr_bicubic
@@ -199,7 +301,10 @@ with open(meta_path, "a") as meta_f:
                 cv2.imwrite(os.path.join(gt_dir, f"{name}.png"), gt_np)
                 cv2.imwrite(os.path.join(sr_bic_dir, f"{name}.png"), lq_np)
 
-                # 记录元数据（关键：保存倍率）
-                meta_f.write(json.dumps({"id": name, "scale": float(sf_any)}) + "\n")
+                # 记录元数据（关键：保存log-scale值）
+                meta_f.write(json.dumps({"id": name, "scale": float(log_scale)}) + "\n")
+            
+            del lq_full, gt_full
+            torch.cuda.empty_cache()
 
-print(f"完成：数据写入 {args.out_root}，下一步运行打标脚本生成 tag/")
+# 数据生成完成，下一步运行打标脚本生成 tag/
