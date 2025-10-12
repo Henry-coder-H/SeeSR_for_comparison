@@ -34,7 +34,7 @@ parser.add_argument("--out_root", type=str, required=True, help="输出根目录
 parser.add_argument("--epoch", type=int, default=1)
 parser.add_argument("--batch_size", type=int, default=2, help="smaller batch size means much time but more extensive degradation for making the training dataset.")
 parser.add_argument("--num_workers", type=int, default=4)
-parser.add_argument("--gt_patch", type=int, default=256, help="GT patch size")
+parser.add_argument("--gt_patch", type=int, default=512, help="GT patch size")
 parser.add_argument("--log_scale_min", type=float, default=math.log(1/16), help="Minimum log-scale value (log(1/16) ≈ -2.77)")
 parser.add_argument("--log_scale_max", type=float, default=0.0, help="Maximum log-scale value (log(1) = 0)")
 parser.add_argument("--seed", type=int, default=42)
@@ -111,10 +111,6 @@ os.makedirs(tag_dir, exist_ok=True)
 meta_path = os.path.join(args.out_root, "scale_meta.jsonl")
 # 若存在则清空，避免重复
 open(meta_path, "w").close()
-
-# --------- ops on cuda ----------
-jpeger = DiffJPEG(differentiable=False).cuda()
-usm  = USMSharp().cuda()
 
 def realesrgan_degradation_anyscale(batch, cfg_deg, sf_any: float):
     """核心退化流程，基于原版实现但支持任意倍率"""
