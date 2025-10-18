@@ -1,1 +1,0 @@
-carry, coast, grassy, hill, hillside, person, man, sea, stone, rocky, shore, shoreline, surfboard, surfer, walk, water, wetsuit,

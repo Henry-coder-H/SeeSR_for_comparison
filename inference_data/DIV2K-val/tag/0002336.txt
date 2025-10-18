@@ -1,1 +1,0 @@
-building, color, draw, house, hut, purple, red, rust, shutter, siding, window, yellow,

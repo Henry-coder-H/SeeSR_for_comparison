@@ -1,1 +1,0 @@
-arch, archway, building, ceiling, pillar, decorate, doorway, entrance, hall, palace, shrine, stand, structure, temple, worship,

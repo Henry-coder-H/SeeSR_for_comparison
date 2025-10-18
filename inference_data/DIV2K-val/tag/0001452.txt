@@ -1,1 +1,0 @@
-blue, cave, log, pool, stump, surround, tree, tree trunk, water, waterfall,

@@ -1,1 +1,0 @@
-ant, bread, bug, floor, food, fungi, insect, stone, stump,clean, high-resolution, 8k

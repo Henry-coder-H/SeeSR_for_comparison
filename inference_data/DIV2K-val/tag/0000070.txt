@@ -1,1 +1,0 @@
-animal, branch, floor, log, reptile, stone, tree, tree branch, tree trunk, wood, woodpecker,

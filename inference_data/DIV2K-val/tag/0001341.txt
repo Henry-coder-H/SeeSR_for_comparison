@@ -1,1 +1,0 @@
-book, bookcase, bookshelf, bookstore, ceiling, pillar, table, fill, floor, hall, library, room, stool, wood floor,

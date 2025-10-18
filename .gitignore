@@ -21,6 +21,7 @@ experience/
 outputs/
 results/
 preset/datasets/output/
+inference_data/
 
 # ===== 数据集（只保留脚本，不传原始数据）=====
 preset/datasets/train_datasets/

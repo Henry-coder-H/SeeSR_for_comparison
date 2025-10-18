@@ -1,1 +1,0 @@
-beak, log, penguin, stone, stand, walk,

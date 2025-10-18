@@ -1,1 +1,0 @@
-animal, boulder, branch, fall, floor, forest, log, stone, stump, tree, tree trunk, wood,

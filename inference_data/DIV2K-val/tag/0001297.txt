@@ -1,1 +1,0 @@
-crop, farmland, field, green, land, lush, man, plant, plow, row, vineyard, walk,

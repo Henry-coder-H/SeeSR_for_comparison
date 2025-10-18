@@ -1,1 +1,0 @@
-clock, building, castle, city, gothic, hill, sea, palace, peak, tower, spire, turret,

@@ -1,1 +1,0 @@
-bookshelf, building, ceiling, pillar, fill, floor, hall, library, room, sculpture,

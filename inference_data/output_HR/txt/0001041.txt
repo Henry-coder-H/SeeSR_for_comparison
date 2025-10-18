@@ -1,1 +1,0 @@
-clock, book, bookcase, bookshelf, bookstore, building, ceiling, pillar, fill, floor, hall, library, room, stool, wood floor,clean, high-resolution, 8k

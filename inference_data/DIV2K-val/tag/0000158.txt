@@ -1,1 +1,0 @@
-ant, beetle, bug, floor, food, fungi, insect, stone,

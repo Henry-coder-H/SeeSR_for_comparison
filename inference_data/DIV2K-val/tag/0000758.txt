@@ -1,1 +1,0 @@
-ant, bread, bug, floor, food, fungi, insect, pastry, pie, stone, stump, topping,

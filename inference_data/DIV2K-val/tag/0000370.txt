@@ -1,1 +1,0 @@
-animal, bird, branch, crocodile, eagle, log, owl, reptile, stump, tree, tree branch, tree trunk, wood,
