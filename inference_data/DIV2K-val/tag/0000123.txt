@@ -1,0 +1,1 @@
+blue, building, city, coast, hillside, house, sea, pool, town, village, water, white,

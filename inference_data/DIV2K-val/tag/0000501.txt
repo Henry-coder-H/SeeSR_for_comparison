@@ -1,0 +1,1 @@
+beak, debris, floor, log, mud, penguin, stone, stand, walk, water, white,

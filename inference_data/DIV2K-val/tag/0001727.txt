@@ -1,0 +1,1 @@
+car, drive, highway, image, license plate, road, traffic, traffic jam, travel, vehicle,

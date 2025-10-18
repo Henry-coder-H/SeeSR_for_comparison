@@ -1,0 +1,1 @@
+attach, blue, building, pole, sign, street sign, writing, yellow,

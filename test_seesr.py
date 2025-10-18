@@ -49,6 +49,17 @@ ram_transforms = transforms.Compose([
             transforms.Resize((384, 384)),
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
         ])
+
+def load_scale_meta(meta_path):
+    """加载scale元数据文件"""
+    import json
+    scale_dict = {}
+    if os.path.exists(meta_path):
+        with open(meta_path, 'r') as f:
+            for line in f:
+                data = json.loads(line.strip())
+                scale_dict[data['id']] = data['scale']
+    return scale_dict
 def load_state_dict_diffbirSwinIR(model: nn.Module, state_dict: Mapping[str, Any], strict: bool=False) -> None:
     state_dict = state_dict.get("state_dict", state_dict)
     
@@ -174,16 +185,59 @@ def main(args, enable_xformers_memory_efficient_attention=True,):
         if args.seed is not None:
             generator.manual_seed(args.seed)
 
-        if os.path.isdir(args.image_path):
-            image_names = sorted(glob.glob(f'{args.image_path}/*.*'))
+        # 检查是否使用LR图像推理模式
+        if args.lr_image_path and args.gt_image_path:
+            # LR图像推理模式（用于验证集）
+            print("使用LR图像推理模式")
+            lr_image_names = sorted(glob.glob(f'{args.lr_image_path}/*.*'))
+            gt_image_names = sorted(glob.glob(f'{args.gt_image_path}/*.*'))
+            
+            # 加载scale元数据
+            scale_dict = {}
+            if args.scale_meta_path:
+                scale_dict = load_scale_meta(args.scale_meta_path)
+                print(f"加载了 {len(scale_dict)} 个scale元数据")
+            
+            # 确保LR和GT图像数量一致
+            if len(lr_image_names) != len(gt_image_names):
+                raise ValueError(f"LR图像数量({len(lr_image_names)})与GT图像数量({len(gt_image_names)})不一致")
+            
+            image_pairs = list(zip(lr_image_names, gt_image_names))
         else:
-            image_names = [args.image_path]
+            # 原有的单图像或图像目录处理方式
+            if os.path.isdir(args.image_path):
+                image_names = sorted(glob.glob(f'{args.image_path}/*.*'))
+            else:
+                image_names = [args.image_path]
+            image_pairs = [(name, None) for name in image_names]
+            # 标准模式下不需要scale元数据
+            scale_dict = {}
 
-        for image_idx, image_name in enumerate(image_names[:]):
+        for image_idx, (image_name, gt_name) in enumerate(image_pairs[:]):
             print(f'================== process {image_idx} imgs... ===================')
             validation_image = Image.open(image_name).convert("RGB")
 
-            validation_prompt, ram_encoder_hidden_states = get_validation_prompt(args, validation_image, model)
+            # 获取图像ID（用于查找scale元数据和标签文件）
+            image_id = os.path.splitext(os.path.basename(image_name))[0]
+
+            # 生成或读取prompt
+            if args.lr_image_path and args.gt_image_path and args.tag_path:
+                # LR推理模式：尝试从标签文件读取prompt
+                tag_file = os.path.join(args.tag_path, f"{image_id}.txt")
+                if os.path.exists(tag_file):
+                    with open(tag_file, 'r') as f:
+                        validation_prompt = f.read().strip()
+                    print(f'[LR推理模式] 从标签文件读取prompt: {validation_prompt}')
+                    # 即使从文件读取prompt，仍需要生成ram_encoder_hidden_states
+                    _, ram_encoder_hidden_states = get_validation_prompt(args, validation_image, model)
+                else:
+                    # 如果标签文件不存在，使用RAM生成
+                    validation_prompt, ram_encoder_hidden_states = get_validation_prompt(args, validation_image, model)
+                    print(f'[LR推理模式] 使用RAM生成prompt: {validation_prompt}')
+            else:
+                # 标准模式：使用RAM生成
+                validation_prompt, ram_encoder_hidden_states = get_validation_prompt(args, validation_image, model)
+            
             validation_prompt += args.added_prompt # clean, extremely detailed, best quality, sharp, clean
             negative_prompt = args.negative_prompt #dirty, messy, low quality, frames, deformed, 
             
@@ -211,33 +265,59 @@ def main(args, enable_xformers_memory_efficient_attention=True,):
 
             # print(f'input size: {height}x{width}')
 
+            # 确定scale值
+            if args.lr_image_path and args.gt_image_path:
+                # LR推理模式：优先使用元数据中的scale值
+                if image_id in scale_dict:
+                    rscale_log = scale_dict[image_id]
+                    rscale = math.exp(rscale_log)  # 转换为原始scale值
+                    print(f'[LR推理模式] 图像ID: {image_id}, Log-scale: {rscale_log:.3f}, 原始scale: {rscale:.3f}')
+                else:
+                    # 如果元数据中没有该图像，使用默认scale=4
+                    rscale = 4.0
+                    rscale_log = math.log(rscale)
+                    print(f'[LR推理模式] 图像ID: {image_id}, 使用默认scale=4, Log-scale: {rscale_log:.3f}')
+            else:
+                # 标准模式：使用命令行参数中的scale值
+                rscale = float(args.upscale)
+                rscale_log = math.log(rscale)
+                print(f'[标准模式] Log-scale: {rscale_log:.3f}, 原始scale: {rscale:.3f}')
+
             ori_width, ori_height = validation_image.size
-            rscale = float(args.upscale)  # 原始scale值，用于resize
-            rscale_log = math.log(rscale)  # log-scale值，用于模型输入
             resize_flag = False
 
-            # 若图太小，先把最短边增大到 process_size / rscale
-            min_needed = args.process_size / rscale
-            if min(ori_width, ori_height) < min_needed:
-                factor = min_needed / min(ori_width, ori_height)
-                new_w = max(1, int(round(ori_width * factor)))
-                new_h = max(1, int(round(ori_height * factor)))
+            if args.lr_image_path and args.gt_image_path:
+                # LR图像推理模式：直接使用LR图像，不需要额外的放大操作
+                # 只需要对齐到8的倍数
+                width = max(8, int(round(validation_image.width / 8.0)) * 8)
+                height = max(8, int(round(validation_image.height / 8.0)) * 8)
+                if (width != validation_image.width) or (height != validation_image.height):
+                    validation_image = validation_image.resize((width, height), Image.BICUBIC)
+                    resize_flag = True
+                print(f'[LR推理模式] input size: {height}x{width}')
+            else:
+                # 标准模式：原有的处理逻辑
+                # 若图太小，先把最短边增大到 process_size / rscale
+                min_needed = args.process_size / rscale
+                if min(ori_width, ori_height) < min_needed:
+                    factor = min_needed / min(ori_width, ori_height)
+                    new_w = max(1, int(round(ori_width * factor)))
+                    new_h = max(1, int(round(ori_height * factor)))
+                    validation_image = validation_image.resize((new_w, new_h), Image.BICUBIC)
+                    resize_flag = True
+
+                # 再按浮点倍率放大
+                new_w = max(1, int(round(validation_image.width * rscale)))
+                new_h = max(1, int(round(validation_image.height * rscale)))
                 validation_image = validation_image.resize((new_w, new_h), Image.BICUBIC)
-                resize_flag = True
 
-            # 再按浮点倍率放大
-            new_w = max(1, int(round(validation_image.width  * rscale)))
-            new_h = max(1, int(round(validation_image.height * rscale)))
-            validation_image = validation_image.resize((new_w, new_h), Image.BICUBIC)
-
-            # 对齐到 8 的倍数
-            width  = max(8, int(round(validation_image.width  / 8.0)) * 8)
-            height = max(8, int(round(validation_image.height / 8.0)) * 8)
-            if (width != validation_image.width) or (height != validation_image.height):
-                validation_image = validation_image.resize((width, height), Image.BICUBIC)
-                resize_flag = True
-
-            print(f'input size: {height}x{width}')
+                # 对齐到8的倍数
+                width = max(8, int(round(validation_image.width / 8.0)) * 8)
+                height = max(8, int(round(validation_image.height / 8.0)) * 8)
+                if (width != validation_image.width) or (height != validation_image.height):
+                    validation_image = validation_image.resize((width, height), Image.BICUBIC)
+                    resize_flag = True
+                print(f'[标准模式] input size: {height}x{width}')
 
 
             for sample_idx in range(args.sample_times):
@@ -261,12 +341,17 @@ def main(args, enable_xformers_memory_efficient_attention=True,):
                     elif args.align_method == 'adain':
                         image = adain_color_fix(image, validation_image)
 
-                if resize_flag: 
-                    image = image.resize((ori_width*rscale, ori_height*rscale))
+                if args.lr_image_path and args.gt_image_path:
+                    # LR推理模式：不需要resize，直接保存
+                    name, ext = os.path.splitext(os.path.basename(image_name))
+                    image.save(f'{args.output_dir}/sample{str(sample_idx).zfill(2)}/{name}.png')
+                else:
+                    # 标准模式：原有的resize逻辑
+                    if resize_flag: 
+                        image = image.resize((ori_width*rscale, ori_height*rscale))
                     
-                name, ext = os.path.splitext(os.path.basename(image_name))
-                
-                image.save(f'{args.output_dir}/sample{str(sample_idx).zfill(2)}/{name}.png')
+                    name, ext = os.path.splitext(os.path.basename(image_name))
+                    image.save(f'{args.output_dir}/sample{str(sample_idx).zfill(2)}/{name}.png')
     
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -277,6 +362,10 @@ if __name__ == "__main__":
     parser.add_argument("--added_prompt", type=str, default="clean, high-resolution, 8k")
     parser.add_argument("--negative_prompt", type=str, default="dotted, noise, blur, lowres, smooth")
     parser.add_argument("--image_path", type=str, default=None)
+    parser.add_argument("--lr_image_path", type=str, default=None, help="LR图像路径（用于验证集推理）")
+    parser.add_argument("--gt_image_path", type=str, default=None, help="GT图像路径（用于验证集推理）")
+    parser.add_argument("--tag_path", type=str, default=None, help="标签文件路径（用于验证集推理）")
+    parser.add_argument("--scale_meta_path", type=str, default=None, help="scale元数据文件路径")
     parser.add_argument("--output_dir", type=str, default=None)
     parser.add_argument("--mixed_precision", type=str, default="fp16") # no/fp16/bf16
     parser.add_argument("--guidance_scale", type=float, default=5.5)

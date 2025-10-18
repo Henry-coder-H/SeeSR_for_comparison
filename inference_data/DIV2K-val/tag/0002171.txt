@@ -1,0 +1,1 @@
+bag, beverage, bottle, cheese, chip, cloth, condiment, container, table, flour, food, juice, package, potato, powder, snack,

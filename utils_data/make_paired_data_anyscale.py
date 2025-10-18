@@ -8,7 +8,7 @@ SeeSR 任意倍率数据构建（基于 RealESRGAN 退化 + 连续 scale）
 注意：此脚本在log空间采样scale，然后转换为原始scale值进行图像处理
 log-scale采样范围：[log(1/16), 0] 对应原始scale范围：[1/16, 1.0]
 
-生成代码：CUDA_VISIBLE_DEVICES=0 python /data4/huangsiyu/SeeSR_baseline/utils_data/make_paired_data_anyscale.py \
+生成代码：CUDA_VISIBLE_DEVICES=2 python /data4/huangsiyu/SeeSR_baseline/utils_data/make_paired_data_anyscale.py \
 --hr_dir /data_center/data1/dataset/DIV2K/train/train_HR \
 --out_root /data4/huangsiyu/SeeSR_baseline/preset/datasets/train_datasets/training_for_seesr \
 --epoch 1
@@ -253,54 +253,55 @@ def realesrgan_degradation_anyscale(batch, cfg_deg, sf_any: float):
 
 step = 0
 with open(meta_path, "a") as meta_f:
-    for ep in range(args.epoch):
-        for batch_idx, batch in enumerate(tqdm(loader, desc=f"Epoch {ep+1}/{args.epoch}")):
-            # 每处理几个batch就清理一次显存
-            if batch_idx % 5 == 0:
+    with torch.no_grad():
+        for ep in range(args.epoch):
+            for batch_idx, batch in enumerate(tqdm(loader, desc=f"Epoch {ep+1}/{args.epoch}")):
+                # 每处理几个batch就清理一次显存
+                if batch_idx % 5 == 0:
+                    torch.cuda.empty_cache()
+                
+                # 在log空间均匀采样
+                log_scale = random.uniform(args.log_scale_min, args.log_scale_max)
+                # 转换为原始scale值用于图像处理
+                sf_any = math.exp(log_scale)
+                lq_full, gt_full = realesrgan_degradation_anyscale(batch, cfg_deg, sf_any)
+
+                # 为保存成训练对：从 LQ/GT 各裁一个随机 patch，并把 LQ 双三次上采回 GT 尺寸，作为 sr_bicubic
+                B, _, H, W = gt_full.shape
+                # LQ patch 尺寸约为 GT_patch / sf_any
+                lq_patch_size = max(8, int(round(args.gt_patch / float(sf_any))))
+                for i in range(B):
+                    step += 1
+                    name = f"{step:07d}"
+
+                    # 随机在 LQ 上取窗口
+                    lq_i = lq_full[i:i+1]
+                    gt_i = gt_full[i:i+1]
+                    h, w = lq_i.shape[-2:]
+                    top_lq = 0 if h - lq_patch_size <= 0 else random.randint(0, h - lq_patch_size)
+                    left_lq = 0 if w - lq_patch_size <= 0 else random.randint(0, w - lq_patch_size)
+                    lq_patch = lq_i[:, :, top_lq:top_lq+lq_patch_size, left_lq:left_lq+lq_patch_size]
+
+                    # 对应映射回 GT（取 center 对齐更稳，也可用 round(top*sf)）
+                    top_gt = int(round(top_lq * sf_any))
+                    left_gt = int(round(left_lq * sf_any))
+                    top_gt = min(max(0, top_gt), gt_i.shape[-2] - args.gt_patch)
+                    left_gt = min(max(0, left_gt), gt_i.shape[-1] - args.gt_patch)
+                    gt_patch = gt_i[:, :, top_gt:top_gt+args.gt_patch, left_gt:left_gt+args.gt_patch]
+
+                    # LQ 上采回 GT 尺寸，作为 sr_bicubic
+                    sr_bic = F.interpolate(lq_patch, size=(args.gt_patch, args.gt_patch), mode='bicubic', align_corners=False)
+
+                    # 保存
+                    gt_np = (gt_patch[0].detach().cpu().permute(1,2,0).numpy()*255.0).clip(0,255).astype('uint8')[:, :, ::-1]
+                    lq_np = (sr_bic[0].detach().cpu().permute(1,2,0).numpy()*255.0).clip(0,255).astype('uint8')[:, :, ::-1]
+                    cv2.imwrite(os.path.join(gt_dir, f"{name}.png"), gt_np)
+                    cv2.imwrite(os.path.join(sr_bic_dir, f"{name}.png"), lq_np)
+
+                    # 记录元数据（关键：保存log-scale值）
+                    meta_f.write(json.dumps({"id": name, "scale": float(log_scale)}) + "\n")
+                
+                del lq_full, gt_full
                 torch.cuda.empty_cache()
-            
-            # 在log空间均匀采样
-            log_scale = random.uniform(args.log_scale_min, args.log_scale_max)
-            # 转换为原始scale值用于图像处理
-            sf_any = math.exp(log_scale)
-            lq_full, gt_full = realesrgan_degradation_anyscale(batch, cfg_deg, sf_any)
-
-            # 为保存成训练对：从 LQ/GT 各裁一个随机 patch，并把 LQ 双三次上采回 GT 尺寸，作为 sr_bicubic
-            B, _, H, W = gt_full.shape
-            # LQ patch 尺寸约为 GT_patch / sf_any
-            lq_patch_size = max(8, int(round(args.gt_patch / float(sf_any))))
-            for i in range(B):
-                step += 1
-                name = f"{step:07d}"
-
-                # 随机在 LQ 上取窗口
-                lq_i = lq_full[i:i+1]
-                gt_i = gt_full[i:i+1]
-                h, w = lq_i.shape[-2:]
-                top_lq = 0 if h - lq_patch_size <= 0 else random.randint(0, h - lq_patch_size)
-                left_lq = 0 if w - lq_patch_size <= 0 else random.randint(0, w - lq_patch_size)
-                lq_patch = lq_i[:, :, top_lq:top_lq+lq_patch_size, left_lq:left_lq+lq_patch_size]
-
-                # 对应映射回 GT（取 center 对齐更稳，也可用 round(top*sf)）
-                top_gt = int(round(top_lq * sf_any))
-                left_gt = int(round(left_lq * sf_any))
-                top_gt = min(max(0, top_gt), gt_i.shape[-2] - args.gt_patch)
-                left_gt = min(max(0, left_gt), gt_i.shape[-1] - args.gt_patch)
-                gt_patch = gt_i[:, :, top_gt:top_gt+args.gt_patch, left_gt:left_gt+args.gt_patch]
-
-                # LQ 上采回 GT 尺寸，作为 sr_bicubic
-                sr_bic = F.interpolate(lq_patch, size=(args.gt_patch, args.gt_patch), mode='bicubic', align_corners=False)
-
-                # 保存
-                gt_np = (gt_patch[0].detach().cpu().permute(1,2,0).numpy()*255.0).clip(0,255).astype('uint8')[:, :, ::-1]
-                lq_np = (sr_bic[0].detach().cpu().permute(1,2,0).numpy()*255.0).clip(0,255).astype('uint8')[:, :, ::-1]
-                cv2.imwrite(os.path.join(gt_dir, f"{name}.png"), gt_np)
-                cv2.imwrite(os.path.join(sr_bic_dir, f"{name}.png"), lq_np)
-
-                # 记录元数据（关键：保存log-scale值）
-                meta_f.write(json.dumps({"id": name, "scale": float(log_scale)}) + "\n")
-            
-            del lq_full, gt_full
-            torch.cuda.empty_cache()
 
 # 数据生成完成，下一步运行打标脚本生成 tag/

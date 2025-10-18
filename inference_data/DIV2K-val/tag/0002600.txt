@@ -1,0 +1,1 @@
+car, headlight, license plate, park, pick up, rust, truck,

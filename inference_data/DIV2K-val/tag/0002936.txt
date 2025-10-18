@@ -1,0 +1,1 @@
+building, color, draw, house, laundry, rust, shutter, siding, window, yellow,
